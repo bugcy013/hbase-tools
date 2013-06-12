@@ -10,7 +10,9 @@ Sample of R scripts for use with data generated from **hbase-rest-stats.py**.
 
 ## How do I use this?
 1. Create a CSV file using the **hbase-rest-stats.py** script.
-    jeremy:~ jeremycarroll$ ./hbase-rest-stats.py -s hbasemaster -f /tmp/data.csv
+
+    [user@hostname:~ ]$ ./hbase-rest-stats.py -s hbasemaster -f /tmp/data.csv
+
 2. Open up your 'R' console (Or R-Studio). Enter in the sample R scripts found in r.txt to play / render this data.
 
 ## What are some samples?
