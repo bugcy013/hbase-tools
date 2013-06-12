@@ -118,4 +118,5 @@ begin
   end
 rescue Timeout::Error => e
   puts "#{Time.now}: JRuby Timeout: #{e}"
+  exit 3
 end
