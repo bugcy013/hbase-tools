@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+import subprocess
+import sys
+import StringIO
+import optparse
+import requests
+import simplejson as json
+
+
+# _ CONSTS
+TIMEOUT = 5
+
+
+def print_and_exit(service, msg, status):
+    """ Parse and print msg, and exit w/status. """
+    code = 'UNKNOWN'
+    #_ Check for current threshold.
+    if status == 0:
+        code = 'OK'
+    if status == 1:
+        code = 'WARNING'
+    if status == 2:
+        code = 'CRITICAL'
+
+    if msg:
+        print '{} RPC Queue Check {} - {}'.format(service, code, msg)
+    else:
+        print '{} RPC Queue Check {}'.format(service, code)
+    sys.exit(status)
+
+
+def compare_metric(status, warn, crit, metric):
+    """ Compare a metric against warn / crit. Set msg
+    and exit status based on result. """
+    exit_status = None
+
+    if metric >= warn:
+        if metric >= crit:
+            exit_status = 2
+        else:
+            exit_status = 1
+    else:
+        exit_status = 0
+    return exit_status
+
+
+def main():
+    #_ Variables
+    exit_status = 3
+    exit_msg = None
+    jmx_json = {}
+
+    #_ Parse Options
+    parser = optparse.OptionParser()
+    parser.add_option('-w', '--warning', type='float', default=2.0, dest='warn',  help='Average RPC Queue Time Warning (secs)')
+    parser.add_option('-c', '--critical', type='float', default=3.0, dest='crit',  help='Average RPC Queue Time Critical (sec)')
+    parser.add_option('-s', '--service', default='NameNode', dest='service',  help='JMX Service to query')
+    parser.add_option('-b', '--bean', default='RpcActivityForPort', dest='bean',  help='JMX MBean to query')
+    parser.add_option('-H', '--host', default='localhost', dest='host',  help='Host')
+    parser.add_option('-p', '--port', default='50070', dest='port',  help='Port')
+    (opts, args) = parser.parse_args()
+
+    #_ Get dfsadmin report
+    try:
+        r = requests.get('http://{}:{}/jmx?qry=Hadoop:service={},name={}*'.format(opts.host, opts.port, opts.service, opts.bean), timeout=TIMEOUT)
+    except Exception, e:
+        exit_status = 3
+        exit_msg = 'Unable to query {}:{} for JMX metrics- {}'.format(opts.host, opts.port, e)
+        print_and_exit(opts.service, exit_msg, exit_status)
+
+    #_ Capture JSON if successful http call (200)
+    if r.status_code == 200:
+        #_ If cannot parse JSON, continue
+        try:
+            jmx_json = r.json()
+        except Exception:
+            pass
+
+    #_ If we have valid JSON, proceed
+    if jmx_json:
+        #_ If our JSON contains data, proceed.
+        if 'beans' in jmx_json:
+            try:
+                if 'RpcQueueTimeAvgTime' in jmx_json['beans'][0]:
+                    queue_time = jmx_json['beans'][0]['RpcQueueTimeAvgTime']
+                    exit_status = compare_metric(exit_status, opts.warn, opts.crit, queue_time)
+                    exit_msg = '{}s Average Time'.format(queue_time)
+            except Exception:
+                exit_msg = 'Unable to find JSON data'
+                pass
+
+    #_ Print message & exit
+    print_and_exit(opts.service, exit_msg, exit_status)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+import subprocess
+import sys
+import StringIO
+import optparse
+
+def split_kv(line):
+    """ Split a string based on K: V """
+    value =line.split(':')[1].strip()
+    if '%' in value:
+        value = value.split('%')[0]
+    return value
+
+
+def calculate_report(dfsadmin_output):
+    """ Return dict() of values based on report output """
+    metrics = {}
+    for line in StringIO.StringIO(dfsadmin_output):
+        if "DFS Used%" in line:
+            metrics['used_pct'] = float(split_kv(line))
+            metrics['free_pct'] = 100.0 - float(metrics['used_pct'])
+        if "Under replicated blocks" in line:
+            metrics['under_replicated'] = int(split_kv(line))
+        if "Blocks with corrupt replicas" in line:
+            metrics['corrupt_blocks'] = int(split_kv(line))
+        if "Missing blocks" in line:
+            metrics['missing_blocks'] = int(split_kv(line))
+        if "Datanodes available" in line:
+            nodes = line.split('(')[1].split(')')[0].split(',')
+            metrics['nodes_total'] = int(nodes[0].split(' ')[0])
+            metrics['nodes_dead'] = int(nodes[1].strip().split(' ')[0])
+        if "Live datanodes" in line:
+            break
+    #_ Post processing
+    #_ Calculate % nodes dead
+    if 'nodes_total' in metrics and 'nodes_dead' in metrics:
+        metrics['nodes_ratio'] = (100.0 * float(metrics['nodes_dead']) / float(metrics['nodes_total']))
+    return metrics
+
+
+def set_status(current,new):
+    """ Set status if new exit code > current. """
+    if new > current:
+        current = new
+    return current
+
+
+def print_and_exit(msg, status):
+    """ Parse and print msg, and exit w/status. """
+    code = 'UNKNOWN'
+    #_ Check for current threshold.
+    if status == 0:
+        code = 'OK'
+    if status == 1:
+        code = 'WARNING'
+    if status == 2:
+        code = 'CRITICAL'
+
+    if msg:
+        print 'HDFS Check {} - {}'.format(code, ','.join(msg))
+    else:
+        print 'HDFS Check {}'.format(code)
+    sys.exit(status)
+
+
+def main():
+    #_ Variables
+    exit_msg = []
+    exit_status = 0
+
+    #_ Parse Options
+    parser = optparse.OptionParser()
+    parser.add_option('--dw', '--dead-warning', default=5, dest='hdfs_dead_warn',  help='% DataNodes Dead Warning')
+    parser.add_option('--dc', '--dead-critical', default=10, dest='hdfs_dead_crit',  help='% DataNodes Dead Critical')
+    parser.add_option('--fw', '--free-warning', default=5, dest='hdfs_free_warn',  help='% Free Space Warning')
+    parser.add_option('--fc', '--free-critical', default=10, dest='hdfs_free_crit',  help='% Free Space Critical')
+    parser.add_option('--bw', '--blocks-warning', default=5, dest='hdfs_blocks_warn',  help='Blocks missing / corrupt')
+    parser.add_option('--bc', '--blocks-critical', default=10, dest='hdfs_blocks_crit',  help='Blocks missing / corrupt')
+    parser.add_option('--rw', '--replicated-warning', default=5, dest='hdfs_replicated_warn',  help='Blocks under replicated')
+    parser.add_option('--rc', '--replicated-critical', default=10, dest='hdfs_replicated_crit',  help='Blocks under replicated')
+    (opts, args) = parser.parse_args()
+
+    #_ Get dfsadmin report
+    try:
+        output = subprocess.check_output('hdfs dfsadmin -report', stderr=subprocess.STDOUT, shell=True)
+    except Exception, e:
+        exit_status = set_status(exit_status,3)
+        exit_msg.append('Unable to run DFS report - {}'.format(e))
+        print_and_exit(exit_msg, exit_status)
+
+    #_ Parse report
+    metrics = calculate_report(output)
+
+    #_ Calculations
+    #_ Dead Nodes
+    if 'nodes_ratio' in metrics:
+        if metrics['nodes_ratio'] >= opts.hdfs_dead_warn:
+            if metrics['nodes_ratio'] >= opts.hdfs_dead_crit:
+                exit_status = set_status(exit_status,2)
+            else:
+                exit_status = set_status(exit_status,1)
+            exit_msg.append('{}% Nodes Dead'.format(metrics['nodes_ratio']))
+
+    #_ HDFS Capacity
+    if 'free_pct' in metrics:
+        if metrics['free_pct'] <= float(opts.hdfs_free_warn):
+            if metrics['free_pct'] <= float(opts.hdfs_free_crit):
+                exit_status = set_status(exit_status,2)
+            else:
+                exit_status = set_status(exit_status,1)
+            exit_msg.append('{}% Free Space Available'.format(metrics['free_pct']))
+
+    #_ HDFS Corrupt/missing blocks
+    if 'corrupt_blocks' in metrics and 'missing_blocks' in metrics:
+        #_ Add corrupt + missing blocks
+        bad_blocks = metrics['corrupt_blocks'] + metrics['missing_blocks']
+        if bad_blocks >= opts.hdfs_blocks_warn:
+            if bad_blocks >= opts.hdfs_blocks_crit:
+                exit_status = set_status(exit_status,2)
+            else:
+                exit_status = set_status(exit_status,1)
+            exit_msg.append('{} Blocks corrupt / missing'.format(bad_blocks))
+
+    #_ HDFS Under Replicated
+    if 'under_replicated' in metrics:
+        if metrics['under_replicated'] >= int(opts.hdfs_replicated_warn):
+            if metrics['under_replicated'] >= int(opts.hdfs_replicated_crit):
+                exit_status = set_status(exit_status,2)
+            else:
+                exit_status = set_status(exit_status,1)
+            exit_msg.append('{} Blocks Under Replicated'.format(metrics['under_replicated']))
+
+    #_ Print message & exit
+    print_and_exit(exit_msg, exit_status)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,172 @@
+#!/usr/bin/env python
+import subprocess
+import sys
+import os
+import StringIO
+import optparse
+import datetime
+import time
+import requests
+import simplejson as json
+
+
+# _ CONSTS
+TIMEOUT = 5
+
+
+def unix_time(dt):
+    epoch = datetime.datetime.utcfromtimestamp(0)
+    delta = dt - epoch
+    return delta.total_seconds()
+
+
+def unix_time_millis(dt):
+    return unix_time(dt) * 1000.0
+
+
+def print_and_exit(msg, status):
+    """ Parse and print msg, and exit w/status. """
+    code = 'UNKNOWN'
+    #_ Check for current threshold.
+    if status == 0:
+        code = 'OK'
+    if status == 1:
+        code = 'WARNING'
+    if status == 2:
+        code = 'CRITICAL'
+
+    if msg:
+        if isinstance(msg, list):
+            print 'HDFS Checkpoint {} - {}'.format(code, ','.join(msg))
+        else:
+            print 'HDFS Checkpoint {} - {}'.format(code, msg)
+    else:
+        print 'HDFS Checkpoint {}'.format(code)
+    sys.exit(status)
+
+
+def set_status(current,new):
+    """ Set status if new exit code > current. """
+    if new > current:
+        current = new
+    return current
+
+
+def get_json(url):
+    """ Request URL, load JSON, exit if error. """
+    url_json = None
+    try:
+        r = requests.get(url, timeout=TIMEOUT)
+    except Exception, e:
+        print_and_exit('Unable to query url - {}'.format(url, e), 4)
+
+    if r.status_code == 200:
+        try:
+            url_json = r.json()
+        except Exception:
+            print_and_exit('Could not load JSON for {}'.format(url), 4)
+    else:
+        print_and_exit('Did not recieve 200 response for {}'.format(url), 4)
+    return url_json
+
+
+def compare_metric(status, warn, crit, metric):
+    """ Compare a metric against warn / crit. Set msg
+    and exit status based on result. """
+    exit_status = None
+
+    if metric >= warn:
+        if metric >= crit:
+            exit_status = 2
+        else:
+            exit_status = 1
+    else:
+        exit_status = 0
+    return exit_status
+
+
+def main():
+    #_ Consts
+    SERVICE='NameNode'
+    BEAN='NameNodeInfo'
+    CHECKPOINT='FSNamesystem'
+
+    #_ Variables
+    failed_dirs = None
+    active_dirs = None
+    exit_status = 0
+    elapsed = None
+    image_found = False
+    jmx_json = {}
+    exit_msg = []
+
+    #_ Parse Options
+    parser = optparse.OptionParser()
+    parser.add_option('-c', '--critical', type='int', default=1, dest='hdfs_dir_crit',  help='Directories Failed Critical')
+    parser.add_option('-w', '--warning', type='int', default=2, dest='hdfs_dir_warn',  help='Directories Failed Critical')
+    parser.add_option('--tw', '--time-warning', type='int', default=60, dest='hdfs_time_warn',  help='Checkpoint Time Warning (mins)')
+    parser.add_option('--tc', '--time-critical', type='int', default=120, dest='hdfs_time_crit',  help='Checkpoint Time Critical (mins)')
+    parser.add_option('-H', '--host', default='localhost', dest='host',  help='Host')
+    parser.add_option('-p', '--port', default='50070', dest='port',  help='Port')
+    (opts, args) = parser.parse_args()
+
+    #_ Get dfsadmin report
+    jmx_json = get_json('http://{}:{}/jmx?qry=Hadoop:service={},name={}*'.format(opts.host, opts.port, SERVICE, BEAN))
+    elapsed_json = get_json('http://{}:{}/jmx?qry=Hadoop:service={},name={}*'.format(opts.host, opts.port, SERVICE, CHECKPOINT))
+
+    #_ If we have valid JSON, proceed
+    if jmx_json and elapsed_json:
+        #_ If our JSON contains data, proceed.
+        if 'beans' in jmx_json:
+            try:
+                if 'NameDirStatuses' in jmx_json['beans'][0]:
+                    status = json.loads(jmx_json['beans'][0]['NameDirStatuses'])
+                    failed = status['failed']
+                    active = status['active']
+                    failed_dirs = len(failed)
+                    active_dirs = len(active)
+                    total_dirs = failed_dirs + active_dirs
+            except Exception:
+                pass
+
+            #_ Calculate total directories online
+            if failed_dirs is None and active_dirs is None:
+                print_and_exit('Unable to find NameNode directories', 4)
+        else:
+            print_and_exit('Could not find MBean in JSON', 4)
+
+        if 'beans' in elapsed_json:
+            try:
+                for i in elapsed_json['beans']:
+                    if 'LastCheckpointTime' in i:
+                        checkpoint = i['LastCheckpointTime']
+                        now = int(time.time()) * 1000
+                        elapsed = (now - checkpoint) / 1000 / 60
+            except Exception, e:
+                pass
+
+    else:
+        print_and_exit('Unable to parser JSON', 4)
+
+    #_ Validate available directories
+    if active_dirs <= opts.hdfs_dir_warn:
+        if active_dirs <= opts.hdfs_dir_crit:
+            exit_status = set_status(exit_status,2)
+        else:
+            exit_status = set_status(exit_status,1)
+    exit_msg.append('{} of {} directories available'.format(active_dirs, total_dirs))
+
+    #_ Validate checkpoint time in minutes
+    if elapsed >= opts.hdfs_time_warn:
+        if elapsed >= opts.hdfs_time_crit:
+            exit_status = set_status(exit_status,2)
+        else:
+            exit_status = set_status(exit_status,1)
+    exit_msg.append('{} minutes since last checkpoint'.format(elapsed))
+
+    #_ Print message & exit
+    print_and_exit(exit_msg, exit_status)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,57 @@
+#!/usr/bin/env python
+import subprocess
+import sys
+import StringIO
+import optparse
+
+def set_status(current,new):
+    """ Set status if new exit code > current. """
+    if new > current:
+        current = new
+    return current
+
+
+def print_and_exit(msg, status):
+    """ Parse and print msg, and exit w/status. """
+    code = 'UNKNOWN'
+    #_ Check for current threshold.
+    if status == 0:
+        code = 'OK'
+    if status == 1:
+        code = 'WARNING'
+    if status == 2:
+        code = 'CRITICAL'
+
+    if msg:
+        print 'HDFS Fsck {} - {}'.format(code, ','.join(msg))
+    else:
+        print 'HDFS Fsck {}'.format(code)
+    sys.exit(status)
+
+
+def main():
+    #_ Variables
+    exit_msg = []
+    exit_status = 0
+
+    #_ Get dfsadmin report
+    try:
+        output = subprocess.check_output('hdfs fsck /', stderr=subprocess.STDOUT, shell=True)
+    except Exception, e:
+        exit_status = set_status(exit_status,3)
+        exit_msg.append('Unable to run Fsck - {}'.format(e))
+        print_and_exit(exit_msg, exit_status)
+
+    #_ Parse output
+    for line in StringIO.StringIO(output):
+        if 'The filesystem under path' in line:
+            if 'HEALTHY' in line:
+                pass
+            else:
+                exit_status = set_status(exit_status,2)
+                exit_msg.append('Unhealthy - {}'.format(line.rstrip()))
+    print_and_exit(exit_msg, exit_status)
+
+
+if __name__ == '__main__':
+    main()

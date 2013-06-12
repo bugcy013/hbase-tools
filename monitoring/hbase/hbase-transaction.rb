@@ -16,7 +16,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-# Prints the hostname of the machine running the active master.
+# Performs a synthetic transaction on an HBase system for monitoring purposes
 
 include Java 
 import org.apache.hadoop.hbase.HBaseConfiguration

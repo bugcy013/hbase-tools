@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+import sys
+import optparse
+import socket
+import simplejson as json
+from kazoo.client import KazooClient
+
+
+# _ CONSTS
+TIMEOUT = 5
+
+
+def print_and_exit(service, msg, status):
+    """ Parse and print msg, and exit w/status. """
+    code = 'UNKNOWN'
+    #_ Check for current threshold.
+    if status == 0:
+        code = 'OK'
+    if status == 1:
+        code = 'WARNING'
+    if status == 2:
+        code = 'CRITICAL'
+
+    if msg:
+        print '{} Followers Check {} - {}'.format(service, code, msg)
+    else:
+        print '{} Followers Check {}'.format(service, code)
+    sys.exit(status)
+
+
+def compare_metric(status, warn, crit, metric):
+    """ Compare a metric against warn / crit. Set msg
+    and exit status based on result. """
+    exit_status = None
+
+    if metric <= warn:
+        if metric <= crit:
+            exit_status = 2
+        else:
+            exit_status = 1
+    else:
+        exit_status = 0
+    return exit_status
+
+
+def get_zk_stats(conn):
+    """ Retrieve ZK stats. """
+    monitor = None
+    try:
+        result = conn.command('mntr')
+        monitor = parse_stats(result)
+    except Exception:
+        pass
+    if monitor:
+        clear = conn.command('srst')
+    return monitor
+
+
+def get_connection(host, port):
+    """ Grab a ZK connection. """
+    quorum = '{}:{}'.format(host, port)
+    zk = KazooClient(hosts=quorum, timeout=5)
+    zk.start()
+    return zk
+
+
+def parse_stats(string):
+    """ Given a ZK result set, parse into
+    key values. """
+    metric_dict = {}
+    try:
+        for line in string.split("\n"):
+            # Remove duplicate whitespaces
+            trimed = ' '.join(line.split()).split(' ')
+            if len(trimed) == 2:
+                try:
+                    metric = trimed[0]
+                    value = trimed[1]
+                    metric_dict[metric] = value
+                except Exception:
+                    continue
+    except Exception, e:
+        pass
+    return metric_dict
+
+
+def main():
+    #_ Variables
+    exit_status = 3
+    exit_msg = None
+
+    #_ Parse Options
+    parser = optparse.OptionParser()
+    parser.add_option('-w', '--warning', type='int', default=3, dest='warn',  help='Servers in Quorum')
+    parser.add_option('-c', '--critical', type='int', default=2, dest='crit',  help='Servers in Quorum')
+    parser.add_option('-H', '--host', default='localhost', dest='host',  help='Host')
+    parser.add_option('-p', '--port', default='2181', dest='port',  help='Port')
+    (opts, args) = parser.parse_args()
+
+    # _ Connect to ZooKeeper
+    try:
+        conn = get_connection(opts.host, opts.port)
+    except Exception, e:
+        exit_status = 3
+        exit_msg = 'Unable to connect to Zookeeper - {}'.format(e)
+        print_and_exit('Zookeeper', exit_msg, exit_status)
+
+    stats = get_zk_stats(conn)
+    if not 'zk_server_state' in stats:
+        exit_status = 3
+        exit_msg = 'Could not determine ZooKeeper state (Follower|Leader)'
+        print_and_exit('Zookeeper', exit_msg, exit_status)
+    if 'follow' in stats['zk_server_state']:
+        exit_status = 0
+        exit_msg = 'Follower'
+    elif 'observer' in stats['zk_server_state']:
+        exit_status = 0
+        exit_msg = 'Observer'
+    else:
+        if 'zk_synced_followers' in stats:
+            quorum = int(stats['zk_synced_followers'])
+            exit_status = compare_metric(exit_status, opts.warn, opts.crit, quorum)
+            exit_msg = '{} ZooKeeper nodes in cluster. Please verify all nodes are alive'.format(quorum + 1)
+        else:
+            exit_status = 3
+            exit_msg = 'Unable to determine server state for this zookeeper node'
+
+    #_ Print message & exit
+    print_and_exit('Zookeeper', exit_msg, exit_status)
+
+
+if __name__ == '__main__':
+    main()
